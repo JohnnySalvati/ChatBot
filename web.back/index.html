@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Web Chat</title>
+    <script src="https://cdn.socket.io/4.3.2/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        h1 {
+            text-align: center;
+        }
+        #chat {
+            border: 1px solid #ccc;
+            padding: 10px;
+            width: 80%;
+            height: 300px;
+            overflow-y: scroll;
+            margin: 10px auto;
+            background: #f9f9f9;
+        }
+        .message {
+            padding: 5px;
+            margin: 5px;
+            border-radius: 5px;
+            max-width: 70%;
+        }
+        .bot { background-color: #e1f5fe; text-align: left; }
+        .user { background-color: #c8e6c9; text-align: right; }
+        .input-container {
+            display: flex;
+            justify-content: center;
+            gap: 5px;
+            margin-top: 10px;
+        }
+        input {
+            padding: 5px;
+            width: 200px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>WhatsApp Web Chat</h1>
+    <div id="chat"></div>
+
+    <div class="input-container">
+        <input type="text" id="number" placeholder="Número WhatsApp">
+        <input type="text" id="message" placeholder="Escribe tu mensaje">
+        <button onclick="sendMessage()">Enviar</button>
+    </div>
+
+    <div class="input-container">
+        <button onclick="handoverChat()">Pasar a un Humano</button>
+    </div>
+
+    <script>
+        // Conectar con WebSockets en la API
+        const socket = io("https://rocky.aomaosam.org.ar", {
+            transports: ["websocket", "polling"]
+        });
+
+
+        socket.on("newMessage", (data) => {
+            const chat = document.getElementById("chat");
+            const messageDiv = document.createElement("div");
+            messageDiv.classList.add("message");
+            messageDiv.classList.add(data.from === "bot" ? "bot" : "user");
+            messageDiv.innerHTML = `<strong>${data.from}:</strong> ${data.text}`;
+            chat.appendChild(messageDiv);
+            chat.scrollTop = chat.scrollHeight; // Auto-scroll al final
+        });
+
+        function sendMessage() {
+            const number = document.getElementById("number").value.trim();
+            const message = document.getElementById("message").value.trim();
+
+            if (!number || !message) {
+                alert("Por favor, ingresa el número y el mensaje.");
+                return;
+            }
+
+            fetch("/whatsapp/send-message", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ to: number, message }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log("Mensaje enviado:", data);
+                document.getElementById("message").value = ""; // Limpiar input
+            })
+            .catch(error => console.error("Error:", error));
+        }
+
+        function handoverChat() {
+            const number = document.getElementById("number").value.trim();
+            
+            if (!number) {
+                alert("Por favor, ingresa un número de WhatsApp.");
+                return;
+            }
+
+            fetch("/whatsapp/handover", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ number }),
+            })
+            .then(response => response.json())
+            .then(data => console.log("Handover activado:", data))
+            .catch(error => console.error("Error:", error));
+        }
+    </script>
+
+</body>
+</html>
