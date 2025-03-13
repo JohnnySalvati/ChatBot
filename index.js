@@ -1,153 +1,309 @@
+// Importar las librerías necesarias
 const venom = require('venom-bot');
-// Si usamos SQLite:
 const sqlite3 = require('sqlite3').verbose();
-// Abrir o crear la base de datos SQLite (archivo local)
-const db = new sqlite3.Database('./chatbot.db');
+const path = require('path');
 
-// Crear tabla si no existe
-db.run(`CREATE TABLE IF NOT EXISTS usuarios (
-    whatsapp TEXT PRIMARY KEY,
-    nombre TEXT NOT NULL,
-    apellido TEXT NOT NULL,
-    dni TEXT NOT NULL,
-    afiliaciones TEXT,
-    ultima_interaccion TEXT
+// Configuración de la base de datos SQLite
+const DB_PATH = path.join(__dirname, 'chatbot.db');
+const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, (err) => {
+    if (err) {
+        console.error('Error al abrir la base de datos:', err.message);
+    } else {
+        console.log('Base de datos SQLite cargada correctamente.');
+    }
+});
+
+// Crear tablas si no existen (tabla de usuarios y tabla de consultas)
+db.run(`CREATE TABLE IF NOT EXISTS users (
+    phone TEXT PRIMARY KEY,
+    name TEXT,
+    document TEXT,
+    affiliation TEXT,
+    lastInteraction INTEGER
+)`);
+db.run(`CREATE TABLE IF NOT EXISTS consultations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_phone TEXT,
+    reason TEXT,
+    timestamp INTEGER,
+    FOREIGN KEY(user_phone) REFERENCES users(phone)
 )`);
 
-// Objeto para llevar el estado de conversación de cada usuario en memoria
-let sessionState = {};  // p. ej., { "5491112345678": { step: 1, nombre: "...", apellido: "..." } }
+// Objeto en memoria para rastrear el estado de la conversación de cada usuario
+const userSessions = {}; 
 
-// Iniciar el cliente Venom-Bot
-venom.create({
-  session: 'support-bot',  // nombre de sesión
-  headless: true           // modo headless para entorno servidor (sin interfaz gráfica)
-}).then(client => {
-  console.log("Bot iniciado correctamente. Esperando mensajes...");
-  
-  client.onMessage(async message => {
-    if (message.isGroupMsg) return;  // ignorar mensajes de grupos, solo chat directo
-   
-    // Obtener ID del remitente (número de WhatsApp)
-    const senderId = message.from;           // ejemplo: "5491112345678@c.us"
-    const phone = senderId.split('@')[0];    // solo el número, sin sufijo "@c.us"
-    
-    // Inicializar estado si es la primera interacción con este número
-    if (!sessionState[phone]) {
-      sessionState[phone] = { step: 1 };  // step 1: esperando nombre y apellido
-      // Enviar saludo inicial y solicitud de nombre completo
-      await client.sendText(senderId, 
-        "¡Hola! 😊 Bienvenido/a. Para comenzar, por favor indícame tu *Nombre y Apellido*:");
-      return; // esperar la respuesta del usuario
-    }
-    
-    // Recuperar el estado actual del usuario
-    const state = sessionState[phone];
-    const userStep = state.step;
-    const userMsg = message.body ? message.body.trim() : "";
-    
-    if (userStep === 1) {
-      // Paso 1: tenemos que recibir Nombre y Apellido
-      if (!userMsg || !userMsg.includes(" ")) {
-        await client.sendText(senderId, "✋ *Nombre y Apellido inválidos.* Por favor ingresa ambos (ejemplo: Juan Pérez).");
-        return;
-      }
-      // Separar nombre y apellido (tomar la primera palabra como nombre y el resto como apellido)
-      const partes = userMsg.split(/\s+/, 2);
-      state.nombre = partes[0];
-      state.apellido = partes.length > 1 ? partes[1] : "";
-      state.step = 2;  // siguiente paso: pedir DNI
-      await client.sendText(senderId, `👍 Gracias *${state.nombre}*. Ahora envíame tu *DNI* (solo números, 7 u 8 dígitos):`);
-      
-    } else if (userStep === 2) {
-      // Paso 2: validar DNI
-      const dni = userMsg.replace(/\D/g, '');  // eliminar cualquier caracter no dígito
-      if (!/^\d{7,8}$/.test(dni)) {
-        await client.sendText(senderId, "❌ *DNI inválido.* Debe contener 7 u 8 dígitos numéricos. Intenta nuevamente:");
-        return;
-      }
-      state.dni = dni;
-      state.step = 3;  // siguiente paso: pedir afiliaciones
-      // Enviar menú de opciones de afiliación
-      await client.sendText(senderId, 
-        "✅ DNI recibido. Ahora, selecciona tus opciones de afiliación (puedes elegir múltiples):\n" +
-        "1. Obra Social\n" +
-        "2. Sindicato\n" +
-        "3. Mutual\n" +
-        "4. Ninguna\n\n" +
-        "_Responde con los números o nombres de las opciones, separados por coma si son varias. Ej: 1,3_");
-      
-    } else if (userStep === 3) {
-      // Paso 3: procesar opciones de afiliación seleccionadas
-      const input = userMsg.toLowerCase();
-      const opciones = input.split(/[,\s]+/).filter(x => x); // separar por comas o espacios
-      const seleccion = new Set();  // usar Set para evitar duplicados
-      for (let opcion of opciones) {
-        opcion = opcion.trim();
-        if (["1", "obra", "social", "obra social"].includes(opcion)) {
-          seleccion.add("Obra Social");
-        }
-        if (["2", "sindicato"].includes(opcion)) {
-          seleccion.add("Sindicato");
-        }
-        if (["3", "mutual"].includes(opcion)) {
-          seleccion.add("Mutual");
-        }
-        if (["4", "ninguna"].includes(opcion)) {
-          seleccion.clear();       // si selecciona "Ninguna", descartamos las otras
-          seleccion.add("Ninguna");
-          break;
-        }
-      }
-      if (seleccion.size === 0) {
-        // No se entendió la respuesta
-        await client.sendText(senderId, "⚠️ *No te he entendido.* Por favor responde con el número o el nombre de tu afiliación (ej: '1', 'Obra Social') y puedes incluir varias separadas por coma.");
-        return;
-      }
-      // Guardar opciones seleccionadas y pasar a resumen
-      state.afiliaciones = Array.from(seleccion);
-      state.step = 4;
-      // Construir mensaje de resumen
-      const listaAfiliaciones = state.afiliaciones.join(", ");
-      let resumen = "🤖 *Resumen de tus datos:* \n";
-      resumen += `• *Nombre:* ${state.nombre}\n`;
-      resumen += `• *Apellido:* ${state.apellido}\n`;
-      resumen += `• *DNI:* ${state.dni}\n`;
-      resumen += `• *Afiliaciones:* ${listaAfiliaciones || "Ninguna"}\n\n`;
-      resumen += "¿*Confirmas* que estos datos son correctos? (Responde *Sí* para confirmar o *No* para reiniciar)";
-      await client.sendText(senderId, resumen);
-      
-    } else if (userStep === 4) {
-      // Paso 4: confirmación final
-      const resp = userMsg.toLowerCase();
-      if (resp === "si" || resp === "sí" || resp === "sí." || resp === "si.") {
-        // Usuario confirma -> guardar en base de datos
-        const nombre = state.nombre;
-        const apellido = state.apellido;
-        const dni = state.dni;
-        const afiliaciones = state.afiliaciones ? state.afiliaciones.join(", ") : "";
-        const fechaHora = new Date().toISOString();
-        // Insertar o actualizar registro en DB
-        db.run(`INSERT OR REPLACE INTO usuarios 
-                (whatsapp, nombre, apellido, dni, afiliaciones, ultima_interaccion) 
-                VALUES (?, ?, ?, ?, ?, ?)`,
-               [phone, nombre, apellido, dni, afiliaciones, fechaHora],
-               err => {
-                 if (err) console.error("Error al guardar en DB:", err.message);
-               });
-        await client.sendText(senderId, `✅ *Gracias ${nombre}.* Tus datos han sido registrados correctamente. 📋 Un operador humano te contactará pronto para continuar con la asistencia. 🙌`);
-        // Terminar sesión: borrar estado para este usuario
-        delete sessionState[phone];
-      } else if (resp === "no" || resp === "no.") {
-        // Usuario no confirma -> reiniciar flujo
-        await client.sendText(senderId, "🔄 De acuerdo, vamos a corregir la información. Empecemos de nuevo.\nPor favor, envíame tu *Nombre y Apellido*:");
-        state.step = 1;
-        // (Opcional: podríamos mantener los datos previos para reutilizar los correctos, pero aquí reiniciamos todo)
-      } else {
-        // Respuesta no reconocida, volver a pedir confirmación
-        await client.sendText(senderId, "Por favor responde *Sí* para confirmar o *No* para reiniciar la captura de datos.");
-      }
-    }
+// Función para limpiar la sesión en memoria
+function resetUserSession(userPhone) {
+    delete userSessions[userPhone];
+}
+
+// Iniciar Venom-Bot
+venom
+  .create({
+      session: 'chatbot-session', 
+      multidevice: true,  
+      headless: true,
+      logQR: true,        
+      autoClose: 0,       
+      disableSpins: true,
+      disableWelcome: true,
+      useChrome: true
+  })
+  .then(client => start(client))
+  .catch(error => {
+      console.error('Error al inicializar Venom-Bot:', error);
+      process.exit(1);
   });
-}).catch(err => {
-  console.error("Error al iniciar Venom-Bot:", err);
-});
+
+function start(client) {
+    console.log('¡Cliente Venom-Bot iniciado y listo para recibir mensajes!');
+
+    client.onMessage(async (message) => {
+        try {
+            // Ignorar mensajes de grupos
+            if (message.isGroupMsg) return;
+
+            const from = message.from;                // "54911XXXXXXX@c.us"
+            const userPhone = from.split('@')[0];     // "54911XXXXXXX"
+            const currentTime = Date.now();
+
+            // Obtener datos del usuario
+            db.get("SELECT * FROM users WHERE phone = ?", [userPhone], async (err, userRow) => {
+                if (err) {
+                    console.error('Error consultando la BD:', err.message);
+                    await client.sendText(from, "Lo siento, ocurrió un error interno. Intentalo más tarde.");
+                    return;
+                }
+
+                // Determinar si es nueva sesión (inactividad > 2 minutos o usuario no existe)
+                let isNewSession = false;
+                if (userRow) {
+                    const last = userRow.lastInteraction || 0;
+                    const diffMinutes = (currentTime - last) / 1000 / 60;
+                    if (diffMinutes > 2) isNewSession = true;
+                } else {
+                    isNewSession = true;
+                }
+
+                // Actualizar la última interacción
+                if (userRow) {
+                    db.run("UPDATE users SET lastInteraction = ? WHERE phone = ?", [currentTime, userPhone]);
+                }
+
+                // Manejo de nueva sesión
+                if (isNewSession) {
+                    resetUserSession(userPhone);
+
+                    // Si el usuario no existe o sus datos están incompletos (sin name/document)
+                    if (!userRow || !userRow.name || !userRow.document) {
+                        await client.sendText(from, "*Bienvenido/a!* Soy ROCKY el asistente de AOMA Seccional Buenos Aires.\nAntes de continuar, necesito actualizar tus datos.");
+                        if (!userRow) {
+                            // Crear registro vacío si no existe
+                            db.run(
+                              "INSERT OR REPLACE INTO users(phone, name, document, affiliation, lastInteraction) VALUES (?, ?, ?, ?, ?)", 
+                              [userPhone, null, null, null, currentTime]
+                            );
+                        }
+                        // Si no tiene nombre, pedir nombre
+                        if (!userRow || !userRow.name) {
+                            await client.sendText(from, "Por favor, indicame tu *nombre completo*:");
+                            userSessions[userPhone] = { state: 'awaiting_name' };
+                            return;
+                        } 
+                        // Si tiene nombre pero no documento, pedir documento
+                        else if (!userRow.document) {
+                            userSessions[userPhone] = { state: 'awaiting_document' };
+                            await client.sendText(from, "Por favor, indicame tu *número de documento*:");
+                            return;
+                        }
+                    }
+
+                    // Si el usuario ya tiene nombre y documento, mostrar datos y pedir confirmación
+                    if (userRow && userRow.name && userRow.document) {
+                        const infoMsg = `*Hola de nuevo* Soy ROCKY el asistente de AOMA Seccional Buenos Aires\n` +
+                                        `Estos son los datos que tengo almacenados:\n` +
+                                        `- *Nombre:* ${userRow.name}\n` +
+                                        `- *Documento:* ${userRow.document}\n` +
+                                        `- *Afiliación:* ${userRow.affiliation ? userRow.affiliation : 'Ninguna'}\n\n` +
+                                        "¿Son correctos?";
+                        await client.sendText(from, infoMsg);
+                        userSessions[userPhone] = { state: 'awaiting_data_confirmation' };
+                        return;
+                    }
+                }
+
+                // Continuar con el flujo normal si no es nueva sesión
+                const sessionState = userSessions[userPhone]?.state || null;
+
+                switch (sessionState) {
+                    case 'awaiting_name':
+                        if (!message.body || !message.body.trim()) {
+                            await client.sendText(from, "No detecté tu nombre. Por favor, ingresá tu *nombre completo*:");
+                            return;
+                        }
+                        const name = message.body.trim();
+                        db.run("UPDATE users SET name = ? WHERE phone = ?", [name, userPhone]);
+                        await client.sendText(from, `Gracias, *${name}*. Ahora, por favor ingresá tu *número de documento*:`);
+                        userSessions[userPhone].state = 'awaiting_document';
+                        break;
+
+                    case 'awaiting_document':
+                        {
+                            const doc = (message.body || "").trim();
+                            if (!/^\d+$/.test(doc)) {
+                                await client.sendText(from, "El documento debe contener solo números. Intentá de nuevo:");
+                                return;
+                            }
+                            db.run("UPDATE users SET document = ? WHERE phone = ?", [doc, userPhone]);
+                            
+                            // Ofrecer botones de afiliación
+                            buttons =                                     [
+                                {
+                                    buttonId: 'btn-obra',
+                                    buttonText: { displayText: 'Obra Social' },
+                                    type: 1
+                                },
+                                {
+                                    buttonId: 'btn-sindicato',
+                                    buttonText: { displayText: 'Sindicato' },
+                                    type: 1
+                                },
+                                {
+                                    buttonId: 'btn-mutual',
+                                    buttonText: { displayText: 'Mutual' },
+                                    type: 1
+                                }
+                            ];
+                            // await client.sendText(from, `Gracias, *${userRow.name}*. Ahora, por favor ingresá *Afiliacion*:`);
+                            await client.sendButtons(
+                                from,                                      // ID del chat
+                                'Seleccione su tipo de afiliación:',        // Título
+                                'Por favor, elija una opción:',              // Subtítulo (no vacío)
+                                buttons
+                            );
+                            userSessions[userPhone].state = 'awaiting_affiliation';
+                        }
+                        break;
+                        
+                    case 'awaiting_affiliation':
+                        {
+                            let affiliation = '';
+                            console.log("Debug: Message en awaiting_affiliation:", JSON.stringify(message, null, 2));
+                            affiliation = message.body.trim();
+                            // // Si la respuesta es de botón interactivo, extraer el display text
+                            // if (message.type === 'buttons_response' && message.selectedDisplayText) {
+                            //     affiliation = message.selectedDisplayText;
+                            // } else {
+                            //     affiliation = message.body ? message.body.trim() : '';
+                            // }
+                            
+                            // // Si sigue vacío, asumir "Ninguna"
+                            // if (!affiliation) {
+                            //     affiliation = 'Ninguna';
+                            // }
+                    
+                            // Normalizar la respuesta a opciones conocidas
+                            const affLower = affiliation.toLowerCase();
+                            if (affLower.includes('obra')) {
+                                affiliation = 'Obra Social';
+                            } else if (affLower.includes('sindicato')) {
+                                affiliation = 'Sindicato';
+                            } else if (affLower.includes('mutual')) {
+                                affiliation = 'Mutual';
+                            } else if (affLower.includes('ninguna')) {
+                                affiliation = 'Ninguna';
+                            } else {
+                                // Si no se reconoce, se registra como "Ninguna" y se informa al usuario
+                                affiliation = 'Ninguna';
+                                await client.sendText(from, "No se reconoció la afiliación, se registrará como 'Ninguna'.");
+                            }
+                            // Guardar la afiliación en la BD
+                            db.run("UPDATE users SET affiliation = ? WHERE phone = ?", [affiliation, userPhone]);
+                            // Mostrar resumen para confirmación
+                            db.get("SELECT name, document, affiliation FROM users WHERE phone = ?", [userPhone], async (err2, row) => {
+                                if (err2) {
+                                    console.error('Error al recuperar datos:', err2.message);
+                                    await client.sendText(from, "Error al verificar tus datos. Intentá nuevamente más tarde.");
+                                    resetUserSession(userPhone);
+                                    return;
+                                }
+                                if (row) {
+                                    const resumen = "*Por favor confirmame tus datos:*\n" +
+                                                    `- *Nombre:* ${row.name}\n` +
+                                                    `- *Documento:* ${row.document}\n` +
+                                                    `- *Afiliación:* ${row.affiliation || 'Ninguna'}\n\n` +
+                                                    "¿Son correctos?";
+                                    await client.sendText(from, resumen);
+                                    userSessions[userPhone].state = 'awaiting_data_confirmation';
+                                }
+                            });
+                        }
+                        break;
+                    
+                    case 'awaiting_data_confirmation':
+                        {
+                            const response = (message.body || "").trim().toLowerCase();
+                            if (['s','si','sí','yes','correcto','correcta'].includes(response)) {
+                                // Datos confirmados -> pedir motivo
+                                await client.sendText(from, "✅ *Datos confirmados.* Ahora, ¿cuál es el *motivo de tu consulta*?");
+                                userSessions[userPhone].state = 'awaiting_reason';
+                            } else if (['n','no','incorrecto','incorrecta','nope','nop'].includes(response)) {
+                                // El usuario dice que sus datos NO son correctos: 
+                                // => REINICIAR completamente (borrar name, doc, affiliation) y pedir todo de nuevo
+                                db.run("UPDATE users SET name = NULL, document = NULL, affiliation = NULL WHERE phone = ?", [userPhone]);
+                                resetUserSession(userPhone);
+                                // Iniciar nuevamente solicitando nombre
+                                await client.sendText(from, "Entendido. Vamos a ingresar los datos nuevamente.\nPor favor, indicame tu *nombre completo*:");
+                                userSessions[userPhone] = { state: 'awaiting_name' };
+                            } else {
+                                await client.sendText(from, "No entendí, los datos son correctos?");
+                            }
+                        }
+                        break;
+
+                    case 'awaiting_reason':
+                        {
+                            const reasonText = (message.body || "").trim();
+                            if (!reasonText) {
+                                await client.sendText(from, "Por favor contame brevemente el *motivo de tu consulta*:");
+                                return;
+                            }
+                            db.run(
+                              "INSERT INTO consultations(user_phone, reason, timestamp) VALUES (?, ?, ?)", 
+                              [userPhone, reasonText, Date.now()]
+                            );
+                            await client.sendText(from, "✅ *Gracias.* el motivo de tu consulta ha sido registrado. Un representante te contactará en breve.");
+                            resetUserSession(userPhone);
+                        }
+                        break;
+
+                    default:
+                        // Sin estado específico
+                        if (userRow && userRow.name && userRow.document && userRow.affiliation && !userSessions[userPhone]) {
+                            await client.sendText(from, "Ya hemos registrado tus datos. Por favor esperá a que un representante responda. Si necesitás iniciar una nueva consulta, aguardá unos minutos e intentá nuevamente.");
+                        } else {
+                            // Iniciar el flujo desde cero
+                            await client.sendText(from, "Hola. Para ayudarte, necesitamos algunos datos. Por favor, indicanos tu *nombre completo*:");
+                            userSessions[userPhone] = { state: 'awaiting_name' };
+                            db.run("INSERT OR REPLACE INTO users(phone, lastInteraction) VALUES (?, ?)", [userPhone, currentTime]);
+                        }
+                }
+            });
+        } catch (err) {
+            console.error("Ocurrió un error en el manejo del mensaje:", err);
+            await client.sendText(message.from, "Lo siento, ocurrió un error procesando su mensaje.");
+        }
+    });
+
+    // Eventos adicionales de Venom
+    client.onStateChange((state) => {
+        console.log('Estado de conexión de Venom:', state);
+        if (state === 'CONFLICT' || state === 'UNLAUNCHED') {
+            client.useHere();
+        }
+        if (state === 'UNPAIRED' || state === 'DISCONNECTED') {
+            console.log('Sesión desconectada. Intentando reiniciar Venom...');
+            venom.create().then(newClient => start(newClient));
+        }
+    });
+}
